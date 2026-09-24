@@ -1,0 +1,81 @@
+name: Desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/desktop-installers]
+    paths:
+      - '.github/desktop/**'
+      - '.github/workflows/desktop-installers.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-installers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mac-arm64
+            runner: macos-15
+          - target: mac-x64
+            runner: macos-15-intel
+          - target: win-x64
+            runner: windows-2025
+    defaults:
+      run:
+        shell: bash
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      NODE_OPTIONS: --max-old-space-size=6144
+      BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build official application
+        run: |
+          pnpm run build:official
+          pnpm run build:desktop
+      - name: Pack runtime dependencies
+        run: |
+          pnpm run release:pack --family dsh --out "apps/desktop/.desktop-build/targets/$BUILD_TARGET/packed/dsh" --concurrency 4
+          pnpm --dir apps/desktop-host pack --pack-destination "../desktop/.desktop-build/targets/$BUILD_TARGET/packed/dsh"
+          pnpm run release:pack --family vendor --out "apps/desktop/.desktop-build/targets/$BUILD_TARGET/packed/vendor" --concurrency 4
+          pnpm --dir native/system run build:ts
+          pnpm --dir native/system/packages/entry pack --pack-destination "../../../../apps/desktop/.desktop-build/targets/$BUILD_TARGET/packed/landlock"
+      - name: Prepare and verify runtime
+        run: |
+          pnpm --dir apps/desktop run prepare:runtime
+          pnpm --dir apps/desktop run prepare:packages
+          node .github/desktop/prepare-community.mjs
+          pnpm exec tsx apps/desktop/.desktop-build/community/prepare-dsh.ts
+      - name: Build community installer
+        run: pnpm --dir apps/desktop exec electron-builder --config ../../.github/desktop/electron-builder.mjs --publish never
+      - name: Verify packaged application
+        run: pnpm exec tsx .github/desktop/smoke.ts
+      - name: Upload verified installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-${{ matrix.target }}-community
+          path: |
+            apps/desktop/.desktop-build/targets/${{ matrix.target }}/community-artifacts/*.dmg
+            apps/desktop/.desktop-build/targets/${{ matrix.target }}/community-artifacts/*.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
