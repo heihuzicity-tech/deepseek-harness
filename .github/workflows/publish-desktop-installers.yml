@@ -1,0 +1,100 @@
+name: Publish desktop installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Desktop installers run ID
+        required: true
+        type: string
+      tag:
+        description: Existing draft release tag pointing to that build commit
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RUN: ${{ inputs.run_id }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Verify build and draft release
+        shell: bash
+        run: |
+          [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" > run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/jobs?per_page=100" > jobs.json
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open('run.json'))
+          jobs = json.load(open('jobs.json'))['jobs']
+          release = next(r for r in json.load(open('releases.json')) if r['tag_name'] == os.environ['RELEASE_TAG'])
+          assert run['path'] == '.github/workflows/desktop-installers.yml'
+          assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert {j['name'] for j in jobs if j['conclusion'] == 'success'} == {'mac-arm64', 'mac-x64', 'win-x64'}
+          assert release['draft'] and release['target_commitish'] == run['head_sha']
+          assert not release['assets'], 'Use an empty draft to avoid replacing published files'
+          with open('release.json', 'w') as output:
+              json.dump(release, output)
+          print('Verified successful native builds and matching draft commit:', run['head_sha'])
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          pattern: deepseek-harness-*-community
+          merge-multiple: true
+          path: installers
+      - name: Hash and upload installers
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          files = sorted(pathlib.Path('installers').iterdir())
+          targets = {'mac-arm64': '.dmg', 'mac-x64': '.dmg', 'win-x64': '.exe'}
+          assert len(files) == 3 and all(f.is_file() for f in files)
+          for target, extension in targets.items():
+              assert sum(f.name.endswith('-' + target + '-community' + extension) for f in files) == 1
+          records = {}
+          for file in files:
+              with file.open('rb') as stream:
+                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+              records[file.name] = {'bytes': file.stat().st_size, 'sha256': digest}
+          sums = pathlib.Path('installers/SHA256SUMS.txt')
+          sums.write_text(''.join(f"{r['sha256']}  {name}\n" for name, r in records.items()))
+          records[sums.name] = {'bytes': sums.stat().st_size, 'sha256': hashlib.sha256(sums.read_bytes()).hexdigest()}
+          pathlib.Path('manifest.json').write_text(json.dumps(records))
+          PY
+          gh release upload "$RELEASE_TAG" installers/* --repo "$GITHUB_REPOSITORY"
+      - name: Verify uploaded bytes and publish
+        shell: bash
+        run: |
+          release_id=$(python3 -c "import json; print(json.load(open('release.json'))['id'])")
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > uploaded.json
+          python3 - <<'PY'
+          import json
+          release = json.load(open('uploaded.json'))
+          records = json.load(open('manifest.json'))
+          assert release['draft']
+          assert {a['name'] for a in release['assets']} == set(records)
+          for asset in release['assets']:
+              expected = records[asset['name']]
+              assert asset['state'] == 'uploaded' and asset['size'] == expected['bytes']
+              assert asset['digest'] == 'sha256:' + expected['sha256']
+          print('All uploaded installers and checksums match their server digests.')
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

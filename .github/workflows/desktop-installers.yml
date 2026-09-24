@@ -40,6 +40,7 @@ jobs:
       BUILD_TARGET: ${{ matrix.target }}
       # Git Bash GNU tar must treat drive-letter paths as local archives.
       TAR_OPTIONS: ${{ matrix.target == 'win-x64' && '--force-local' || '' }}
+      ELECTRON_BUILDER_7Z_FILTER: BCJ
     steps:
       - uses: actions/checkout@v6
         with:
@@ -71,6 +72,15 @@ jobs:
         run: pnpm --dir apps/desktop exec electron-builder --config ../../.github/desktop/electron-builder.mjs --publish never
       - name: Verify packaged application
         run: pnpm exec tsx .github/desktop/smoke.ts
+      - name: Preserve failed Windows installer for diagnosis
+        if: failure() && matrix.target == 'win-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-diagnostic-${{ github.run_id }}
+          path: apps/desktop/.desktop-build/targets/win-x64/community-artifacts/*.exe
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 3
       - name: Upload verified installer
         uses: actions/upload-artifact@v4
         with:

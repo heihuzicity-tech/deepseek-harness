@@ -1,17 +1,20 @@
 /** Certificate-free community installers; official signed release commands remain independent. */
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import { officePackageDirectories } from '../../scripts/libreoffice-packages.mjs'
 import { resolveDesktopTargetBuildPaths } from '../../apps/desktop/scripts/desktop-build-paths.mjs'
 import { prepareWindowsAsarUnpack, verifyWindowsAsarUnpack } from '../../apps/desktop/scripts/windows-asar-unpack.mjs'
+import { installWindowsDirectoryInstaller } from '../../apps/desktop/scripts/windows-directory-installer.mjs'
 
 const app = fileURLToPath(new URL('../../apps/desktop/', import.meta.url))
 const paths = resolveDesktopTargetBuildPaths()
 const version = JSON.parse(readFileSync(join(app, 'package.json'), 'utf8')).version
 const target = { platform: process.platform, arch: process.arch }
 let windowsCode = []
+if (process.platform === 'win32') installWindowsDirectoryInstaller()
 
 export default {
   appId: 'com.deepseek.harness',
@@ -33,7 +36,8 @@ export default {
     { from: paths.dsh, to: 'dsh', filter: ['**/*'] },
     { from: join(paths.dsh, 'node_modules'), to: 'dsh/node_modules', filter: ['**/*'] },
   ],
-  asarUnpack: ['**/*.{node,dylib,dll,so,exe}', '**/*.so.*', '**/spawn-helper', '**/@vscode/ripgrep-*/bin/rg'],
+  asarUnpack: ['**/*.{node,dylib,dll,so,exe}', '**/*.so.*', '**/spawn-helper', '**/@vscode/ripgrep-*/bin/rg',
+    `**/node_modules/@deepseek-ai/libreoffice-kit-${target.platform}-${target.arch}/**/*`],
   extraResources: [
     { from: paths.runtime, to: 'runtime' },
     { from: join(app, 'resources/icon-windows.png'), to: 'icon.png' },
@@ -50,9 +54,23 @@ export default {
     target: ['dmg'],
   },
   dmg: { sign: false, writeUpdateInfo: false },
-  win: { icon: join(app, 'resources/icon-windows.png'), forceCodeSigning: false, signAndEditExecutable: false, target: ['nsis'] },
-  nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, runAfterFinish: false },
+  win: { icon: join(app, 'resources/icon-windows.png'), forceCodeSigning: false, signExecutable: false, target: ['nsis'] },
+  nsis: {
+    installerSidebar: join(paths.root, 'installer-ui/uninstaller-sidebar.bmp'),
+    uninstallerSidebar: join(paths.root, 'installer-ui/uninstaller-sidebar.bmp'),
+    include: join(app, 'scripts/installer.nsh'),
+    oneClick: false, perMachine: false, allowElevation: false,
+    allowToChangeInstallationDirectory: false, installerLanguages: ['en_US', 'zh_CN'], runAfterFinish: false,
+  },
   publish: null,
+  beforeBuild: async () => {
+    if (process.platform === 'win32') {
+      await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        join(app, 'scripts/prepare-windows-installer.ps1'), '-OutputDirectory', join(paths.root, 'installer-ui')],
+      { windowsHide: true })
+    }
+    return true
+  },
   beforePack: async context => {
     const office = await officePackageDirectories(paths.dsh, target)
     context.packager.config.asarUnpack.push(...office.map(dir => `**/${relative(paths.dsh, dir).split(sep).join('/')}/**/*`))
