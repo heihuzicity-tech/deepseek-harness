@@ -63,15 +63,12 @@ export default {
     allowToChangeInstallationDirectory: false, installerLanguages: ['en_US', 'zh_CN'], runAfterFinish: false,
   },
   publish: null,
-  beforeBuild: async () => {
+  beforePack: async context => {
     if (process.platform === 'win32') {
       await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
         join(app, 'scripts/prepare-windows-installer.ps1'), '-OutputDirectory', join(paths.root, 'installer-ui')],
       { windowsHide: true })
     }
-    return true
-  },
-  beforePack: async context => {
     const office = await officePackageDirectories(paths.dsh, target)
     context.packager.config.asarUnpack.push(...office.map(dir => `**/${relative(paths.dsh, dir).split(sep).join('/')}/**/*`))
     if (process.platform === 'win32') windowsCode = await prepareWindowsAsarUnpack(context, paths.dsh)
