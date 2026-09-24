@@ -39,7 +39,7 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=6144
       BUILD_TARGET: ${{ matrix.target }}
       # Git Bash GNU tar must treat drive-letter paths as local archives.
-      TAR_OPTIONS: ${{ runner.os == 'Windows' && '--force-local' || '' }}
+      TAR_OPTIONS: ${{ matrix.target == 'win-x64' && '--force-local' || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
